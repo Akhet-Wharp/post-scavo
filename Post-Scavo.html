@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Akhet - Post Scavo</title>
+
+<!-- MSAL.js -->
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.1/lib/msal-browser.min.js"></script>
+<!-- jsPDF -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<!-- exifr: lettura EXIF (data + GPS) dalle foto -->
+<script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
+<!-- PDF.js: lettura testo dalle tavole PDF -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- docx.js: generazione Word (file locale) -->
+<script src="docx.iife.js"></script>
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#b9a879;padding:20px;min-height:100vh}
+.container{max-width:1200px;margin:0 auto;background:#fff;border-radius:15px;padding:30px;box-shadow:0 20px 60px rgba(0,0,0,0.3)}
+.login-box{max-width:400px;margin:50px auto;background:#fff;padding:40px;border-radius:15px;box-shadow:0 10px 30px rgba(0,0,0,0.3);text-align:center}
+.header{background:#b8423a;color:#fff;padding:20px;border-radius:10px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}
+h1{font-size:24px} h2{margin-bottom:20px} h3{margin-bottom:15px}
+.form-group{margin-bottom:15px}
+label{display:block;font-weight:600;margin-bottom:5px}
+input,select,textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;font-size:14px;box-sizing:border-box}
+textarea{min-height:80px;font-family:inherit;resize:none}
+.btn{padding:10px 20px;border:none;border-radius:5px;cursor:pointer;font-size:14px;font-weight:600;margin:5px;transition:opacity 0.3s}
+.btn:hover{opacity:0.8}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.btn-primary{background:#b8423a;color:#fff}
+.btn-secondary{background:#8a7d62;color:#fff}
+.btn-danger{background:#e74c3c;color:#fff}
+.small-btn{padding:6px 12px;font-size:12px}
+.info{background:#f5f0e8;padding:15px;border-radius:8px;margin:15px 0}
+.msg-error{background:#ffebee;color:#c62828;padding:15px;border-radius:8px;margin:15px 0;border-left:4px solid #c62828}
+.msg-success{background:#e8f5e9;color:#2e7d32;padding:15px;border-radius:8px;margin:15px 0;border-left:4px solid #2e7d32}
+
+/* Loading overlay */
+#loadingOverlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(184,66,58,0.97);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;color:#fff}
+#loadingOverlay h2{font-size:22px;margin-bottom:10px;letter-spacing:1px}
+#loadingOverlay p{font-size:14px;opacity:0.85;margin-bottom:30px}
+.loading-spinner{width:48px;height:48px;border:5px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 0.9s linear infinite;margin-bottom:20px}
+.loading-step{font-size:13px;opacity:0.75;min-height:20px;text-align:center}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Step indicator */
+.step-indicator{display:flex;margin-bottom:25px;border-radius:8px;overflow:hidden;border:1px solid #ddd}
+.step-indicator .step{flex:1;padding:12px 8px;text-align:center;font-size:13px;font-weight:600;background:#f9f9f9;color:#aaa;border-right:1px solid #ddd;transition:all 0.3s}
+.step-indicator .step:last-child{border-right:none}
+.step-indicator .step.active{background:#b8423a;color:#fff}
+.step-indicator .step.done{background:#f5f0e8;color:#b8423a}
+
+/* Phases */
+.phase{display:none}
+.phase.active{display:block}
+
+/* Info bar */
+.info-bar{background:#f5f0e8;border-radius:8px;padding:12px 16px;font-size:13px;color:#555;margin-bottom:16px;border-left:4px solid #b8423a}
+.info-bar strong{color:#b8423a}
+
+/* Upload area */
+.upload-area{border:3px dashed #b8423a;border-radius:12px;padding:40px;text-align:center;cursor:pointer;background:#fdf8f5;margin-bottom:20px;transition:all 0.3s}
+.upload-area:hover,.upload-area.drag-over{background:#f0e6e2;border-color:#8a2b25}
+.upload-area .upload-icon{font-size:48px;margin-bottom:12px}
+.upload-area h3{color:#b8423a;margin-bottom:6px}
+.upload-area p{color:#888;font-size:13px}
+
+/* Preview grid */
+.foto-preview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:14px;margin-bottom:20px}
+.foto-preview-card{position:relative;border-radius:10px;overflow:hidden;border:3px solid #ddd;background:#f5f5f5;transition:border-color 0.2s}
+.foto-preview-card.hq{border-color:#b8423a;box-shadow:0 0 0 2px rgba(184,66,58,0.3)}
+.foto-preview-card img{width:100%;height:125px;object-fit:cover;display:block;cursor:pointer}
+.card-meta{padding:6px 8px;font-size:10px;color:#888;font-family:monospace;line-height:1.5}
+.card-num{font-weight:700;color:#555;font-size:11px}
+.hq-badge{position:absolute;top:6px;left:6px;background:#b8423a;color:#fff;font-size:10px;font-weight:700;padding:3px 7px;border-radius:4px;display:none}
+.foto-preview-card.hq .hq-badge{display:block}
+.remove-btn{position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.55);color:#fff;border:none;border-radius:50%;width:22px;height:22px;font-size:13px;line-height:22px;text-align:center;cursor:pointer;padding:0;opacity:0;transition:opacity 0.2s}
+.foto-preview-card:hover .remove-btn{opacity:1}
+.quality-toggle{width:100%;padding:5px;border:none;font-size:11px;font-weight:600;cursor:pointer;transition:all 0.2s}
+.quality-toggle.compressed{background:#f0f0f0;color:#666}
+.quality-toggle.hq-btn{background:#b8423a;color:#fff}
+
+/* Progress */
+.progress-wrap{background:#f0ebe3;border-radius:10px;overflow:hidden;margin:10px 0;height:14px}
+.progress-bar{height:14px;background:#b8423a;border-radius:10px;transition:width 0.3s;width:0%}
+.upload-log{max-height:150px;overflow-y:auto;background:#f9f9f9;border-radius:8px;padding:10px;font-size:12px;font-family:monospace;color:#555;margin-top:10px}
+
+/* Catalog table */
+.table-wrap{overflow-x:auto;margin-bottom:20px}
+table{border-collapse:collapse;font-size:13px;min-width:900px;width:100%}
+th{text-align:left;padding:9px 8px;color:#fff;background:#b8423a;font-weight:600;white-space:nowrap}
+td{padding:6px;border-bottom:1px solid #eee;vertical-align:middle}
+td.num-cell{font-family:monospace;font-size:11px;color:#888;white-space:nowrap;min-width:100px}
+input[type=text].sm,input[type=date].sm{width:100%;min-width:100px}
+select.sm{width:80px}
+.contesto-input{width:100%;min-width:150px}
+.thumb-cell{text-align:center;min-width:70px}
+.thumb-cell img{width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid #ddd;cursor:pointer}
+.change-btn{display:block;margin-top:3px;font-size:10px;background:none;border:1px dashed #aaa;border-radius:4px;padding:2px 5px;cursor:pointer;color:#888;width:56px}
+.change-btn:hover{background:#f5f0e8;border-color:#b8423a;color:#b8423a}
+.exif-tag{font-size:10px;color:#27ae60;margin-top:2px}
+
+/* Success */
+.success-screen{text-align:center;padding:3rem 1rem}
+.success-screen .check{font-size:60px;margin-bottom:16px}
+
+/* Lightbox */
+.lightbox{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:2000;align-items:center;justify-content:center}
+.lightbox.active{display:flex}
+.lightbox img{max-width:90%;max-height:90%;border-radius:8px}
+.lightbox-close{position:absolute;top:20px;right:40px;color:#fff;font-size:40px;cursor:pointer;font-weight:bold}
+
+/* Bottom sheet */
+#fotoPickerOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:flex-end;justify-content:center}
+#fotoPickerOverlay.active{display:flex}
+
+/* Footer */
+.powered-by-footer{text-align:center;padding:12px 0 4px;margin-top:30px;border-top:1px solid #e0d8c8;font-size:11px;color:#9a8f7a;letter-spacing:0.5px}
+.powered-by-footer span{font-weight:700;color:#b8423a}
+
+/* Review mode */
+.review-table th{background:#8a7d62}
+.review-table .session-divider td{background:#f5f0e8;font-weight:600;font-size:12px;color:#8a7d62;padding:6px 8px}
+.mode-selector{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.mode-card{flex:1;min-width:200px;border:2px solid #ddd;border-radius:10px;padding:20px;cursor:pointer;text-align:center;transition:all 0.2s;background:#fafafa}
+.mode-card:hover{border-color:#b8423a;background:#fdf8f5}
+.mode-card .mode-icon{font-size:36px;margin-bottom:8px}
+.mode-card h4{margin-bottom:4px;color:#333}
+.mode-card p{font-size:12px;color:#888}
+
+/* Main navigation */
+.main-nav{display:flex;gap:0;margin-bottom:25px;border-bottom:2px solid #b8423a;flex-wrap:wrap}
+.main-nav-btn{padding:12px 20px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:600;color:#888;border-bottom:3px solid transparent;margin-bottom:-2px;transition:all 0.2s;white-space:nowrap}
+.main-nav-btn.active{color:#b8423a;border-bottom-color:#b8423a}
+.main-nav-btn:hover:not(.active){color:#555}
+.main-section{display:none}
+.main-section.active{display:block}
+.placeholder-section{text-align:center;padding:4rem 2rem;color:#aaa}
+.placeholder-section .ph-icon{font-size:56px;margin-bottom:16px}
+.placeholder-section h3{color:#b8423a;margin-bottom:8px}
+.placeholder-section p{font-size:14px}
+
+#userInfo{display:flex;align-items:center;gap:10px}
+
+@media(max-width:768px){
+  .foto-preview-grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
+  .header{flex-direction:column;align-items:flex-start}
+  .step-indicator .step{font-size:11px;padding:9px 3px}
+}
+</style>
+</head>
+<body>
+
+<!-- LOADING OVERLAY -->
+<div id="loadingOverlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(184,66,58,0.97);z-index:9999;flex-direction:column;align-items:center;justify-content:center;color:#fff">
+  <h2 style="font-size:22px;margin-bottom:10px">Akhet - Post Scavo</h2>
+  <p style="font-size:14px;opacity:0.85;margin-bottom:30px">Connessione in corso...</p>
+  <div class="loading-spinner"></div>
+  <div class="loading-step" id="loadingStep">Connessione a SharePoint...</div>
+</div>
+
+<!-- LOGIN SCREEN -->
+<div id="loginScreen" class="login-box">
+  <h2>Akhet</h2>
+  <p style="color:#666;margin-bottom:6px">Post Scavo</p>
+  <p style="color:#aaa;font-size:12px;margin-bottom:24px">Documentazione post-scavo</p>
+
+  <button class="btn btn-primary" onclick="loginMicrosoft()" style="width:100%;font-size:16px" id="btnLogin">
+    🔐 Accedi con Microsoft 365
+  </button>
+
+  <div style="display:flex;align-items:center;gap:10px;margin:15px 0">
+    <div style="flex:1;height:1px;background:#ddd"></div>
+    <span style="color:#aaa;font-size:12px">oppure</span>
+    <div style="flex:1;height:1px;background:#ddd"></div>
+  </div>
+
+  <div id="magicLinkSection">
+    <input type="email" id="magicLinkEmail" placeholder="La tua email"
+      style="width:100%;padding:12px;border:1px solid #ddd;border-radius:5px;font-size:15px;box-sizing:border-box;margin-bottom:10px">
+    <button class="btn btn-secondary" onclick="richiediAccesso()" style="width:100%;font-size:15px" id="btnMagicLink">
+      📧 Accedi con Link Email
+    </button>
+    <p style="font-size:11px;color:#aaa;margin-top:8px;text-align:center">Riceverai un link da copiare dal tuo responsabile</p>
+  </div>
+
+  <button class="btn" onclick="clearSessionAndReload()" style="width:100%;font-size:13px;margin-top:12px;background:#f5f5f5;color:#666">
+    🔄 Cambia Account
+  </button>
+  <div id="loginError" style="display:none;margin-top:15px;padding:12px;border-radius:6px;font-size:13px"></div>
+</div>
+
+<!-- APP -->
+<div id="app" class="container" style="display:none">
+
+  <div class="header">
+    <div>
+      <h1>Akhet - Post Scavo</h1>
+    </div>
+    <div id="userInfo">
+      <span id="userRoleBadge" style="background:rgba(255,255,255,0.2);border-radius:5px;padding:4px 10px;font-size:12px"></span>
+      <span id="userName" style="color:#fff;font-size:13px"></span>
+      <button class="btn btn-secondary small-btn" onclick="logout()">Esci</button>
+    </div>
+  </div>
+
+  <!-- Main navigation -->
+  <div class="main-nav">
+    <button class="main-nav-btn active" id="mnav-foto" onclick="showMainSection('foto')">🖼️ Documentazione fotografica</button>
+    <button class="main-nav-btn" id="mnav-us" onclick="showMainSection('us')">📋 Elenco Schede US</button>
+    <button class="main-nav-btn" id="mnav-tavole" onclick="showMainSection('tavole')">📐 Elenco Tavole</button>
+  </div>
+
+  <!-- ══ SEZIONE: Documentazione fotografica ══ -->
+  <div id="sec-foto" class="main-section active">
+
+  <div class="step-indicator">
+    <div class="step active" id="s1">1 · Cantiere</div>
+    <div class="step"        id="s2">2 · Foto</div>
+    <div class="step"        id="s3">3 · Caricamento</div>
+    <div class="step"        id="s4">4 · Catalogo</div>
+  </div>
+
+  <div id="appMsg"></div>
+
+  <!-- FASE 1: Cantiere + scelta modalità -->
+  <div id="phase-cantiere" class="phase active">
+    <h3>🏗️ Seleziona il cantiere</h3>
+    <div class="form-group" style="max-width:500px">
+      <label>Cantiere</label>
+      <select id="selCantiere" onchange="onCantiereChange()">
+        <option value="">— Seleziona cantiere —</option>
+      </select>
+    </div>
+    <div id="cantInfoBar" class="info-bar" style="display:none"></div>
+
+    <!-- Scelta modalità -->
+    <div id="modeSelector" style="display:none;margin-top:20px">
+      <p style="font-weight:600;margin-bottom:12px;color:#555">Cosa vuoi fare?</p>
+      <div class="mode-selector">
+        <div class="mode-card" onclick="goToPhase('phase-upload',2)">
+          <div class="mode-icon">📷</div>
+          <h4>Nuovo caricamento</h4>
+          <p>Carica le foto della giornata odierna</p>
+        </div>
+        <div class="mode-card" onclick="enterReviewMode()">
+          <div class="mode-icon">📚</div>
+          <h4>Rivedi catalogo completo</h4>
+          <p>Consulta tutte le foto caricate finora e genera il PDF finale</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FASE 2: Bulk upload + qualità -->
+  <div id="phase-upload" class="phase">
+    <h3>📷 Carica le foto e seleziona la qualità</h3>
+    <div id="cantInfoBar2" class="info-bar"></div>
+
+    <div class="upload-area" id="uploadArea" onclick="document.getElementById('bulkInput').click()">
+      <div class="upload-icon">📁</div>
+      <h3>Seleziona tutte le foto</h3>
+      <p>Tocca qui o trascina i file · JPG, PNG, HEIC</p>
+    </div>
+    <input type="file" id="bulkInput" accept="image/*" multiple style="display:none" onchange="onBulkSelect(event)">
+
+    <div class="info" id="uploadLegend" style="display:none">
+      <strong style="color:#b8423a">🔴 Cornice rossa = Alta qualità</strong> — file originale caricato su SharePoint. &nbsp;|&nbsp;
+      <strong>Grigia = Compressa</strong> — ridimensionata a max 1200px, JPEG 80%. &nbsp;|&nbsp;
+      Le foto vengono ordinate per data EXIF prima del caricamento.
+    </div>
+
+    <div class="foto-preview-grid" id="previewGrid"></div>
+
+    <div style="display:none;gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px" id="uploadActions">
+      <button class="btn btn-secondary small-btn" onclick="selectAllHQ()">⭐ Tutte alta qualità</button>
+      <button class="btn btn-secondary small-btn" onclick="selectAllCompressed()">🗜️ Tutte compresse</button>
+      <span id="uploadCount" style="font-size:13px;color:#888;margin-left:8px"></span>
+      <button class="btn btn-primary" id="btnStartUpload" onclick="startUpload()" style="margin-left:auto">
+        Carica su SharePoint →
+      </button>
+    </div>
+    <button class="btn btn-secondary small-btn" onclick="tornaIndietro()" style="margin-top:15px">← Indietro</button>
+  </div>
+
+  <!-- FASE 3: Upload in corso -->
+  <div id="phase-uploading" class="phase">
+    <div style="text-align:center;padding:2rem 0 1rem">
+      <div class="loading-spinner" style="margin:0 auto 16px;border-top-color:#b8423a;border-color:#f0ebe3"></div>
+      <h3 id="uplTitle">Caricamento foto in corso...</h3>
+      <p id="uplMsg" style="color:#666;margin:8px 0 14px"></p>
+      <div class="progress-wrap" style="max-width:440px;margin:0 auto">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+      <p id="uplCounter" style="font-size:13px;color:#aaa;margin-top:8px"></p>
+    </div>
+    <div class="upload-log" id="uploadLog"></div>
+  </div>
+
+  <!-- FASE 4: Catalogazione -->
+  <div id="phase-catalog" class="phase">
+    <h3>📋 Catalogazione delle foto</h3>
+    <div id="cantInfoBar4" class="info-bar"></div>
+    <p style="font-size:13px;color:#666;margin-bottom:15px">
+      ⎘ = duplica riga &nbsp;|&nbsp;
+      <span style="color:#27ae60">📷 EXIF</span> = data rilevata dalla foto &nbsp;|&nbsp;
+      <span style="color:#27ae60">📍 GPS</span> = località rilevata dalla foto
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>N. Foto</th><th>Foto</th><th>Qualità</th>
+            <th>Operatore</th><th>Data</th><th>Località</th>
+            <th>Descrizione</th><th>Vista da</th><th>Contesto</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="catalogRows"></tbody>
+      </table>
+    </div>
+    <div id="catalogSaveMsg" style="display:none;font-size:13px;color:#2e7d32;margin-bottom:8px;font-weight:600"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <button class="btn btn-secondary small-btn" onclick="tornaAdAggiungereFoto()">📷 Aggiungi foto</button>
+      <button class="btn btn-secondary" id="btnSaveCatalog" onclick="saveCatalog()">💾 Salva</button>
+      <button class="btn btn-secondary" id="btnAggiorna" onclick="aggiornaCatalogo()">🔄 Aggiorna</button>
+      <button class="btn btn-secondary" id="btnValida" onclick="validaCatalogo()" style="display:none">✅ Valida</button>
+      <button class="btn btn-primary"   id="btnGeneraCatalogo" onclick="showCatalogoModelSelector()" style="display:none;margin-left:auto">📄 Genera catalogo</button>
+    </div>
+    <button class="btn btn-secondary small-btn" onclick="resetAll()">← Torna ai cantieri</button>
+  </div>
+
+  <div class="powered-by-footer">Powered by <span>WHARP srl SB</span></div>
+
+  </div><!-- /sec-foto -->
+
+  <!-- MODAL: scelta modello catalogo -->
+  <div id="modelSelectorModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:3000;align-items:center;justify-content:center">
+    <div style="background:#fff;border-radius:14px;padding:30px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+      <h3 style="margin-bottom:20px;color:#333">📄 Genera catalogo</h3>
+      <p style="color:#666;font-size:14px;margin-bottom:20px">Scegli il modello e il formato:</p>
+
+      <p style="font-weight:600;font-size:13px;margin-bottom:10px;color:#555">Modello Piemonte (A4 verticale)</p>
+      <div style="display:flex;gap:10px;margin-bottom:20px">
+        <button class="btn btn-primary" onclick="esportaCatalogo('piemonte','pdf')" style="flex:1">📄 PDF</button>
+        <button class="btn btn-secondary" onclick="esportaCatalogo('piemonte','word')" style="flex:1">📝 Word</button>
+      </div>
+
+      <p style="font-weight:600;font-size:13px;margin-bottom:10px;color:#555">Modello Valle d'Aosta (A4 orizzontale)</p>
+      <div style="display:flex;gap:10px;margin-bottom:24px">
+        <button class="btn btn-primary" onclick="esportaCatalogo('vda','pdf')" style="flex:1">📄 PDF</button>
+        <button class="btn btn-secondary" onclick="esportaCatalogo('vda','word')" style="flex:1">📝 Word</button>
+      </div>
+
+      <button class="btn" onclick="closeCatalogoModal()" style="width:100%;background:#f0f0f0;color:#666">Annulla</button>
+    </div>
+  </div>
+
+  <!-- ══ SEZIONE: Elenco Schede US ══ -->
+  <div id="sec-us" class="main-section">
+    <div class="placeholder-section">
+      <div class="ph-icon">📋</div>
+      <h3>Elenco Schede US</h3>
+      <p>Questa sezione sarà disponibile in una versione futura.<br>Conterrà l'elenco delle Unità Stratigrafiche documentate nel cantiere.</p>
+    </div>
+  </div>
+
+  <!-- ══ SEZIONE: Elenco Tavole ══ -->
+  <div id="sec-tavole" class="main-section">
+    <div class="placeholder-section">
+      <div class="ph-icon">📐</div>
+      <h3>Elenco Tavole</h3>
+      <p>Questa sezione sarà disponibile in una versione futura.<br>Conterrà l'elenco delle tavole grafiche prodotte per il cantiere.</p>
+    </div>
+  </div>
+</div>
+
+<!-- LIGHTBOX -->
+<div id="lightbox" class="lightbox" onclick="closeLightbox()">
+  <span class="lightbox-close">&times;</span>
+  <img id="lightboxImg" src="" alt="">
+</div>
+
+<!-- BOTTOM SHEET -->
+<div id="fotoPickerOverlay" onclick="closeFotoPicker()">
+  <div style="background:#fff;border-radius:20px 20px 0 0;padding:20px;width:100%;max-width:500px" onclick="event.stopPropagation()">
+    <div style="width:40px;height:4px;background:#ddd;border-radius:2px;margin:0 auto 20px"></div>
+    <p style="text-align:center;font-weight:600;color:#333;margin-bottom:20px;font-size:16px">📸 Sostituisci foto</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+      <button type="button" onclick="triggerSinglePicker('camera')"
+        style="padding:20px 10px;border:2px solid #e0e0e0;border-radius:12px;background:#f8f9fa;cursor:pointer;font-size:14px;font-weight:600;color:#333;display:flex;flex-direction:column;align-items:center;gap:8px">
+        <span style="font-size:32px">📷</span>Fotocamera
+      </button>
+      <button type="button" onclick="triggerSinglePicker('gallery')"
+        style="padding:20px 10px;border:2px solid #e0e0e0;border-radius:12px;background:#f8f9fa;cursor:pointer;font-size:14px;font-weight:600;color:#333;display:flex;flex-direction:column;align-items:center;gap:8px">
+        <span style="font-size:32px">🖼️</span>Galleria
+      </button>
+    </div>
+    <button type="button" onclick="closeFotoPicker()"
+      style="width:100%;padding:14px;border:none;border-radius:10px;background:#f0f0f0;color:#666;font-size:15px;cursor:pointer;font-weight:500">
+      Annulla
+    </button>
+  </div>
+</div>
+<input type="file" id="singleCam" accept="image/*" capture="environment" style="display:none">
+<input type="file" id="singleGal" accept="image/*" style="display:none">
+
+<datalist id="contesti-list">
+  <option value="Sedime stradale asfaltato">
+  <option value="Sedime stradale sterrato">
+  <option value="Sedime stradale sterrato/asfaltato">
+  <option value="Area boscata">
+  <option value="Area agricola">
+  <option value="Altro">
+</datalist>
+
+
+<script src="post-scavo.js"></script>
+</body>
+</html>
