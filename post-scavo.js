@@ -849,23 +849,40 @@ async function startUpload() {
     const folderName = buildFolderName();
     addLog(`📁 Drive: ${drive.name} | Cartella: ${folderName}`);
 
-    // Contatori per anno: carica quante foto di ogni anno ci sono già
+    // Contatori per anno: max tra file su SP e righe già in catalogRows per quell'anno
     msg.textContent = 'Recupero conteggio foto esistenti per anno...';
     const yearCounters = {};
 
-    catalogRows = [];
+    // Salva le righe già presenti (da sessione precedente o da rivedi catalogo)
+    const existingRows = [...catalogRows];
 
     for (let i = 0; i < sorted.length; i++) {
-      const item  = sorted[i];
-      const year  = item.exif?.dateObj?.getFullYear() || new Date().getFullYear();
+      const item = sorted[i];
+      const year = item.exif?.dateObj?.getFullYear() || new Date().getFullYear();
 
-      // Carica conteggio anno la prima volta che lo incontriamo
       if (yearCounters[year] === undefined) {
-        yearCounters[year] = await getExistingPhotoCountForYear(driveId, folderName, year);
-        addLog(`📊 Foto ${year} già caricate: ${yearCounters[year]}`);
+        // Conta file su SP
+        const spCount = await getExistingPhotoCountForYear(driveId, folderName, year);
+        // Conta righe già in catalogRows per questo anno
+        const memCount = existingRows.filter(r => {
+          if (!r.data) return false;
+          return new Date(r.data + 'T00:00:00').getFullYear() === year;
+        }).length;
+        yearCounters[year] = Math.max(spCount, memCount);
+        addLog(`📊 Anno ${year}: ${spCount} file su SP, ${memCount} in memoria → parto da ${yearCounters[year] + 1}`);
       }
 
       const fname = buildNum(yearCounters[year], year) + '.jpg';
+
+      // Controllo anti-duplicato
+      const isDupe = existingRows.some(r => r.filename === fname) ||
+                     catalogRows.some(r => r.filename === fname);
+      if (isDupe) {
+        addLog(`⚠️ Salto ${fname}: nome già presente nel catalogo`);
+        yearCounters[year]++;
+        continue;
+      }
+
       yearCounters[year]++;
 
       bar.style.width = Math.round((i / sorted.length) * 100) + '%';
@@ -920,22 +937,31 @@ async function startUpload() {
 function renderCatalogRows() {
   const tbody = document.getElementById('catalogRows');
   tbody.innerHTML = '';
+
+  // Trova nomi duplicati e avvisa
+  const nameCounts = {};
+  catalogRows.forEach(r => { if (r.filename) nameCounts[r.filename] = (nameCounts[r.filename] || 0) + 1; });
+  const dupeNames = Object.keys(nameCounts).filter(k => nameCounts[k] > 1);
+  if (dupeNames.length) {
+    showMsg(`⚠️ ${dupeNames.length} nome/i duplicato/i nel catalogo. Clicca "Aggiorna" per rinumerare correttamente.`, 'error');
+  }
+
   catalogRows.forEach((r, i) => {
-    // Debug: verifica stato previewUrl
-    console.log(`Row ${i}: filename=${r.filename}, previewUrl tipo=${typeof r.previewUrl}, lunghezza=${r.previewUrl?.length || 0}, inizio=${r.previewUrl?.slice(0,30) || 'VUOTO'}`);
+    const isDupe = nameCounts[r.filename] > 1;
 
     const tr = document.createElement('tr');
+    if (isDupe) tr.style.background = '#fff3cd'; // evidenzia giallo i duplicati
 
     // Cella thumbnail
     const thumbTd = document.createElement('td');
     thumbTd.className = 'thumb-cell';
     thumbTd.dataset.filename = r.filename;
-    if (r.previewUrl) {
+    const thumbSrc = r.previewUrl || r.thumbUrl || '';
+    if (thumbSrc) {
       const img = document.createElement('img');
-      img.src = r.previewUrl;
-      img.style.cssText = 'width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid #ddd;cursor:pointer';
+      img.src = thumbSrc;
+      img.style.cssText = 'width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid #ddd;cursor:zoom-in';
       img.addEventListener('click', () => openLightboxFull(r));
-      img.style.cursor = 'zoom-in';
       thumbTd.appendChild(img);
     } else {
       const ph = document.createElement('div');
@@ -1080,10 +1106,16 @@ async function aggiornaCatalogo() {
     catalogoValidato   = false;
     updateButtonStates();
 
-    const msg = renameTasks.length > 0
+    const msg2 = renameTasks.length > 0
       ? `✅ ${renameTasks.length} file rinominati, ${catalogRows.length} righe riordinate.`
       : `✅ Ordine già corretto. ${catalogRows.length} righe nel catalogo.`;
-    showMsg(msg, 'success');
+    showMsg(msg2, 'success');
+
+    // Ricarica thumbnail con i nuovi nomi file (quelli rinominati hanno URL non più validi)
+    if (renameTasks.length > 0) {
+      renameTasks.forEach(t => { t.row.thumbUrl = ''; }); // invalida vecchie URL
+    }
+    _loadThumbnailsFromSharePoint(catalogRows);
 
   } catch(e) {
     showMsg('❌ Aggiornamento fallito: ' + e.message, 'error');
@@ -1431,7 +1463,8 @@ async function _loadThumbnailsFromSharePoint(items) {
     const folderName = buildFolderName();
     for (const item of items) {
       try {
-        const fname = item.filename.endsWith('.jpg') ? item.filename : item.filename + '.jpg';
+        const fname = item.filename ? (item.filename.endsWith('.jpg') ? item.filename : item.filename + '.jpg') : '';
+        if (!fname) continue;
         const res = await fetch(
           `https://graph.microsoft.com/v1.0/sites/${siteId}/drives/${drive.id}/root:/${encodeURIComponent(folderName + '/' + fname)}:/thumbnails/0/medium`,
           { headers: { 'Authorization': `Bearer ${accessToken}` } }
@@ -1439,19 +1472,28 @@ async function _loadThumbnailsFromSharePoint(items) {
         if (!res.ok) continue;
         const td = await res.json();
         if (td.url) {
-          // Aggiorna previewUrl nella riga e nel DOM
-          item.previewUrl = td.url;
-          const row = catalogRows.find(r => r === item);
-          if (row) row.previewUrl = td.url;
-          // Trova l'img nel DOM per questa riga tramite il data-filename
-          document.querySelectorAll(`[data-filename="${CSS.escape(item.filename)}"] img`).forEach(img => {
-            img.src = td.url;
-          });
+          // Salva su row in modo persistente (sopravvive ai re-render)
+          item.thumbUrl = td.url;
+          // Aggiorna anche l'img nel DOM se presente
+          const cell = document.querySelector(`[data-filename="${CSS.escape(item.filename)}"]`);
+          if (cell) {
+            const img = cell.querySelector('img');
+            if (img) img.src = td.url;
+            const ph = cell.querySelector('div');
+            if (ph && !img) {
+              const newImg = document.createElement('img');
+              newImg.src = td.url;
+              newImg.style.cssText = 'width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid #ddd;cursor:pointer';
+              newImg.addEventListener('click', () => openLightboxFull(item));
+              cell.insertBefore(newImg, ph);
+              ph.remove();
+            }
+          }
         }
-      } catch(e) { /* thumbnail non disponibile, skip */ }
+      } catch(e) { /* skip */ }
     }
   } catch(e) {
-    console.warn('Thumbnail SharePoint non disponibili:', e.message);
+    console.warn('Thumbnail SP non disponibili:', e.message);
   }
 }
 
@@ -1469,26 +1511,19 @@ function buildFolderName() {
 }
 
 function buildNum(yearIndex, year) {
-  // yearIndex = progressivo già esistente per quell'anno (0-based offset)
-  const sito = sanitize(currentProj?.codiceSito  || '');
-  const comm = sanitize(currentProj?.committente || '');
-  const yy   = String(year || new Date().getFullYear()).slice(2);
-  return `${sito}_${comm}${yy}_${String(yearIndex + 1).padStart(3,'0')}`;
+  const base = buildFolderName().replace(/_Documentazione fotografica$/i, '');
+  return `${base}_${String(yearIndex + 1).padStart(3,'0')}`;
 }
 
 function buildNumPreview(i, year) {
-  const sito = sanitize(currentProj?.codiceSito  || 'SITO');
-  const comm = sanitize(currentProj?.committente || 'COMM');
-  const yy   = String(year || '??').toString().slice(2);
-  return `${sito}_${comm}${yy}_${String(i + 1).padStart(3,'0')}`;
+  const base = buildFolderName().replace(/_Documentazione fotografica$/i, '');
+  return `${base}_${String(i + 1).padStart(3,'0')}`;
 }
 
 async function getExistingPhotoCountForYear(driveId, folderName, year) {
   try {
-    const yy     = String(year).slice(2);
-    const sito   = sanitize(currentProj?.codiceSito  || '');
-    const comm   = sanitize(currentProj?.committente || '');
-    const prefix = `${sito}_${comm}${yy}_`.toLowerCase();
+    const base   = buildFolderName().replace(/_Documentazione fotografica$/i, '');
+    const prefix = `${base}_`.toLowerCase();
     const files  = await getDriveChildren(driveId, folderName, 'name');
     return files.filter(f =>
       f.name.toLowerCase().startsWith(prefix) &&
