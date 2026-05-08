@@ -874,15 +874,24 @@ async function startUpload() {
         addLog(`📊 Anno ${year}: ${spCount} file su SP, ${memCount} in memoria → parto da ${yearCounters[year] + 1}`);
       }
 
-      const fname = buildNum(yearCounters[year], year) + '.jpg';
-
-      // Controllo anti-duplicato
-      const isDupe = existingRows.some(r => r.filename === fname) ||
-                     catalogRows.some(r => r.filename === fname);
-      if (isDupe) {
-        addLog(`⚠️ Salto ${fname}: nome già presente nel catalogo`);
+      // Cerca un nome libero su SharePoint — incrementa finché non trova uno non occupato
+      let fname = buildNum(yearCounters[year], year) + '.jpg';
+      let attempts = 0;
+      while (attempts < 50) {
+        const alreadyInMemory = existingRows.some(r => r.filename === fname) ||
+                                catalogRows.some(r => r.filename === fname);
+        if (!alreadyInMemory) {
+          // Verifica anche su SharePoint (evita conflitti tra utenti concorrenti)
+          const checkRes = await fetch(
+            `https://graph.microsoft.com/v1.0/sites/${siteId}/drives/${driveId}/root:/${encodeURIComponent(folderName + '/' + fname)}`,
+            { headers: { 'Authorization': `Bearer ${accessToken}` } }
+          );
+          if (checkRes.status === 404) break; // nome libero → usalo
+          addLog(`⚠️ ${fname} già presente su SP, incremento...`);
+        }
         yearCounters[year]++;
-        continue;
+        fname = buildNum(yearCounters[year], year) + '.jpg';
+        attempts++;
       }
 
       yearCounters[year]++;
