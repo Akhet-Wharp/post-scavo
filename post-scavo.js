@@ -263,14 +263,16 @@ async function loadCantieri() {
   const listId = d.value[0].id;
   const items  = await spFetch(`https://graph.microsoft.com/v1.0/sites/${cantieriSiteId}/lists/${listId}/items?$expand=fields&$top=999`);
 
+  const deaccent = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+
   cantieriData = items.value.map(i => ({
     id:                  i.id,
     title:               i.fields.Title || '',
-    comune:              i.fields.Comune || '',
-    committente:         i.fields.Committente || '',
-    codiceProgetto:      i.fields.CodProg || '',
-    codiceCommessa:      i.fields.CodComm || '',
-    codiceSito:          i.fields.CodiceSito || '',
+    comune:              deaccent(i.fields.Comune || ''),
+    committente:         deaccent(i.fields.Committente || ''),
+    codiceProgetto:      deaccent(i.fields.CodProg || ''),
+    codiceCommessa:      deaccent(i.fields.CodComm || ''),
+    codiceSito:          deaccent(i.fields.CodiceSito || ''),
     responsabileEnte:    i.fields.ResponsabileEnte || '',
     descrizioneProgetto: i.fields.Descrizione || i.fields.Description || i.fields.Descrizione0 || '',
   }));
@@ -1031,8 +1033,15 @@ function removeCatalogRow(id) {
 async function saveCatalog() {
   document.getElementById('btnSaveCatalog').disabled = true;
   const msg = document.getElementById('catalogSaveMsg');
-  if (msg) { msg.textContent = '⏳ Salvataggio...'; msg.style.display = 'block'; }
+  if (msg) { msg.textContent = '⏳ Caricamento catalogo completo...'; msg.style.display = 'block'; }
   try {
+    // Carica tutte le righe da SP e unisci con quelle nuove in memoria
+    const tutteLeRighe = await getExistingCatalogItems();
+    const righeNuove   = catalogRows.filter(r => !r.spItemId);
+    const spIds        = new Set(tutteLeRighe.map(r => r.spItemId));
+    catalogRows = [...tutteLeRighe, ...righeNuove.filter(r => !spIds.has(r.spItemId))];
+    renderCatalogRows();
+
     for (let i = 0; i < catalogRows.length; i++) {
       if (msg) msg.textContent = `Salvataggio voce ${i + 1}/${catalogRows.length}…`;
       const r = catalogRows[i];
@@ -1044,7 +1053,6 @@ async function saveCatalog() {
       }
     }
     if (msg) { msg.textContent = '✅ Salvato'; setTimeout(() => { msg.style.display='none'; }, 3000); }
-    // Reset flags dopo ogni salvataggio
     catalogoAggiornato = false;
     catalogoValidato   = false;
     updateButtonStates();
@@ -1055,6 +1063,29 @@ async function saveCatalog() {
   }
 }
 
+async function validaCatalogo() {
+  try {
+    // Carica tutte le righe da SP prima di validare
+    showMsg('⏳ Caricamento catalogo completo...', 'success');
+    const tutteLeRighe = await getExistingCatalogItems();
+    const righeNuove   = catalogRows.filter(r => !r.spItemId);
+    const spIds        = new Set(tutteLeRighe.map(r => r.spItemId));
+    catalogRows = [...tutteLeRighe, ...righeNuove.filter(r => !spIds.has(r.spItemId))];
+    renderCatalogRows();
+    _loadThumbnailsFromSharePoint(catalogRows);
+
+    if (!catalogRows.length) {
+      showMsg('⚠️ Nessuna foto nel catalogo da validare.', 'error');
+      return;
+    }
+    catalogoValidato = true;
+    updateButtonStates();
+    showMsg(`✅ Catalogo validato: ${catalogRows.length} foto. Ora puoi generare il documento finale.`, 'success');
+  } catch(e) {
+    showMsg('❌ Errore durante la validazione: ' + e.message, 'error');
+  }
+}
+
 async function aggiornaCatalogo() {
   const btn = document.getElementById('btnAggiorna');
   if (btn) btn.disabled = true;
@@ -1062,60 +1093,122 @@ async function aggiornaCatalogo() {
 
   try {
     const drive      = await getDriveForFoto();
-    const folderName = buildFolderName();
+    const folderName = await findActualFolderName(drive);
 
-    // 1. Ordina per data cronologica
-    catalogRows.sort((a, b) => {
-      const da = a.data ? new Date(a.data + 'T00:00:00') : new Date(0);
-      const db = b.data ? new Date(b.data + 'T00:00:00') : new Date(0);
-      return da - db;
+    // 1. Leggi i file fisicamente presenti su SharePoint (fonte di verità)
+    showMsg('⏳ Lettura file su SharePoint...', 'success');
+    const filesOnDisk = await getDriveChildren(drive.id, folderName, '');
+    const spFiles = filesOnDisk.filter(f => /\.(jpg|jpeg|png|heic)$/i.test(f.name));
+
+    if (!spFiles.length) {
+      showMsg('⚠️ Nessun file trovato nella cartella SharePoint.', 'error');
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    // 2. Leggi tutte le righe da CatalogoFoto
+    showMsg('⏳ Lettura catalogo da SharePoint...', 'success');
+    const tutteLeRighe = await getExistingCatalogItems();
+
+    // Costruisci mappa nome (senza .jpg, normalizzato) → riga catalogo
+    const normalize = s => (s||'').replace(/\.jpg$/i,'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    const catalogoMap = {};
+    tutteLeRighe.forEach(r => {
+      const key = normalize(r.filename);
+      if (key) catalogoMap[key] = r;
     });
 
-    // 2. Calcola nuovi nomi per anno e identifica solo le rinominazioni necessarie
+    // 3. Abbina ogni file SP alla sua riga CatalogoFoto per nome (normalizzato)
+    const fileRows = spFiles.map(spFile => {
+      const key      = normalize(spFile.name);
+      const catalogRow = catalogoMap[key] || null;
+      const dataOp   = catalogRow?.data ? new Date(catalogRow.data + 'T00:00:00') : null;
+      const dataSP   = new Date(spFile.lastModifiedDateTime);
+      return { spFile, catalogRow, dataOp, dataSP };
+    });
+
+    // 4. Ordina per data operatore → fallback data SP
+    fileRows.sort((a, b) => {
+      const hasA = a.dataOp && !isNaN(a.dataOp);
+      const hasB = b.dataOp && !isNaN(b.dataOp);
+      if (hasA && hasB) return a.dataOp - b.dataOp;
+      if (hasA && !hasB) return -1;
+      if (!hasA && hasB) return 1;
+      return a.dataSP - b.dataSP;
+    });
+
+    // 5. Calcola nuovi nomi progressivi per anno
     const yearCounters = {};
     const renameTasks  = [];
-    catalogRows.forEach(row => {
-      const year = row.data ? new Date(row.data + 'T00:00:00').getFullYear() : new Date().getFullYear();
+    fileRows.forEach(item => {
+      const year = (item.dataOp && !isNaN(item.dataOp))
+        ? item.dataOp.getFullYear()
+        : item.dataSP.getFullYear();
       if (!yearCounters[year]) yearCounters[year] = 0;
       const newName = buildNum(yearCounters[year], year) + '.jpg';
       yearCounters[year]++;
-      if (row.filename && row.filename !== newName) {
-        renameTasks.push({ row, oldName: row.filename, newName });
+      const oldName = item.spFile.name;
+      if (oldName.toLowerCase() !== newName.toLowerCase()) {
+        renameTasks.push({ item, oldName, newName });
       }
-      row.filename = newName;
+      if (item.catalogRow) item.catalogRow.filename = newName;
     });
 
-    // 3. Rinomina solo i file che hanno cambiato nome (PATCH minime)
-    for (const task of renameTasks) {
-      await renameFileOnDrive(drive.id, folderName, task.oldName, task.newName);
+    // 6. Rinomina su SharePoint in due fasi (evita conflitti 409)
+    if (renameTasks.length > 0) {
+      showMsg(`⏳ Rinominazione ${renameTasks.length} file (fase 1/2)...`, 'success');
+      for (let i = 0; i < renameTasks.length; i++) {
+        renameTasks[i].tmpName = `_tmp_${String(i).padStart(4,'0')}.jpg`;
+        await renameFileOnDrive(drive.id, folderName, renameTasks[i].oldName, renameTasks[i].tmpName);
+      }
+      showMsg(`⏳ Rinominazione ${renameTasks.length} file (fase 2/2)...`, 'success');
+      for (const task of renameTasks) {
+        await renameFileOnDrive(drive.id, folderName, task.tmpName, task.newName);
+      }
     }
 
-    // 4. Aggiorna CatalogoFoto con nuovi nomi (solo le righe rinominate)
-    for (const task of renameTasks) {
-      if (task.row.spItemId) await updateCatalogoItem(task.row);
+    // 7. Aggiorna CatalogoFoto con i nuovi nomi
+    showMsg('⏳ Aggiornamento CatalogoFoto...', 'success');
+    for (const item of fileRows) {
+      if (item.catalogRow?.spItemId) await updateCatalogoItem(item.catalogRow);
     }
 
-    // 5. Salva anche le righe senza spItemId (nuove, non ancora mai salvate)
-    const nuove = catalogRows.filter(r => !r.spItemId);
-    for (const row of nuove) {
+    // 8. Salva righe nuove in memoria non ancora in CatalogoFoto
+    for (const row of catalogRows.filter(r => !r.spItemId)) {
       await saveCatalogoItem(row);
     }
 
+    // 9. Ricostruisci catalogRows includendo TUTTE le foto SP
+    //    anche quelle senza riga in CatalogoFoto (appariranno con campi vuoti)
+    catalogRows = fileRows.map((item, idx) => {
+      if (item.catalogRow) return item.catalogRow;
+      // Foto presente su SP ma non in CatalogoFoto → crea riga vuota
+      return {
+        id:          Date.now() + idx,
+        filename:    item.spFile.name,
+        spItemId:    null,
+        previewUrl:  '',
+        thumbUrl:    '',
+        hq:          false,
+        exif:        {},
+        operatore:   '',
+        data:        '',
+        localita:    '',
+        descrizione: '',
+        vista:       '',
+        contesto:    '',
+      };
+    });
     renderCatalogRows();
+    _loadThumbnailsFromSharePoint(catalogRows);
     catalogoAggiornato = true;
     catalogoValidato   = false;
     updateButtonStates();
 
-    const msg2 = renameTasks.length > 0
-      ? `✅ ${renameTasks.length} file rinominati, ${catalogRows.length} righe riordinate.`
-      : `✅ Ordine già corretto. ${catalogRows.length} righe nel catalogo.`;
-    showMsg(msg2, 'success');
-
-    // Ricarica thumbnail con i nuovi nomi file (quelli rinominati hanno URL non più validi)
-    if (renameTasks.length > 0) {
-      renameTasks.forEach(t => { t.row.thumbUrl = ''; }); // invalida vecchie URL
-    }
-    _loadThumbnailsFromSharePoint(catalogRows);
+    const esito = renameTasks.length > 0
+      ? `✅ ${renameTasks.length} file rinominati, ${fileRows.length} foto in ordine cronologico.`
+      : `✅ Ordine già corretto. ${fileRows.length} foto nel catalogo.`;
+    showMsg(esito, 'success');
 
   } catch(e) {
     showMsg('❌ Aggiornamento fallito: ' + e.message, 'error');
@@ -1138,16 +1231,6 @@ async function renameFileOnDrive(driveId, folderName, oldName, newName) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Rinomina ${oldName} → ${newName} fallita (${res.status}): ${txt.slice(0,100)}`);
   }
-}
-
-function validaCatalogo() {
-  if (!catalogRows.length) {
-    showMsg('⚠️ Nessuna foto nel catalogo da validare.', 'error');
-    return;
-  }
-  catalogoValidato = true;
-  updateButtonStates();
-  showMsg('✅ Catalogo validato. Ora puoi generare il documento finale.', 'success');
 }
 
 function showCatalogoModelSelector() {
@@ -1427,34 +1510,9 @@ async function enterReviewMode() {
 // Sincronizzazione leggera: legge i file presenti nella cartella SP
 // ed elimina da CatalogoFoto le righe orfane. Restituisce le righe valide.
 async function _sincronizzaSilente(items) {
-  try {
-    const drive      = await getDriveForFoto();
-    const folderName = buildFolderName();
-    const files      = await getDriveChildren(drive.id, folderName, 'name');
-    const filesOnDisk = new Set(files
-      .map(f => f.name.toLowerCase())
-      .filter(n => /\.(jpg|jpeg|png|heic)$/.test(n)));
-
-    const orphans = items.filter(r => {
-      const fname = ((r.filename || '') + (r.filename && r.filename.includes('.') ? '' : '.jpg')).toLowerCase();
-      return fname && !filesOnDisk.has(fname);
-    });
-
-    // Cancella le righe orfane da CatalogoFoto
-    for (const row of orphans) {
-      if (row.spItemId) {
-        await fetch(
-          `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${catalogoListId}/items/${row.spItemId}`,
-          { method: 'DELETE', headers: { 'Authorization': `Bearer ${accessToken}` } }
-        ).catch(() => {}); // ignora errori singoli
-      }
-    }
-
-    return items.filter(r => !orphans.includes(r));
-  } catch(e) {
-    console.warn('Sincronizzazione silente fallita:', e.message);
-    return items; // in caso di errore ritorna tutto
-  }
+  // Non cancelliamo nulla automaticamente — solo riportiamo i file mancanti
+  // per evitare perdite di dati in caso di disallineamento nomi vecchi/nuovi
+  return items;
 }
 
 async function _loadThumbnailsFromSharePoint(items) {
@@ -1510,20 +1568,46 @@ function buildFolderName() {
   return `${sito}_${comm}${yy}_${comune}_${prog}_Documentazione fotografica`;
 }
 
+// Cerca la cartella reale su SharePoint (gestisce accenti e varianti nel nome)
+async function findActualFolderName(drive) {
+  const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[\s_-]/g,'');
+  const expected = norm(buildFolderName());
+  try {
+    const res = await fetch(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/drives/${drive.id}/root/children?$select=name&$top=200`,
+      { headers: { 'Authorization': `Bearer ${accessToken}` } }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const found = (data.value || []).find(f => norm(f.name) === expected);
+      if (found) return found.name;
+    }
+  } catch(e) { console.warn('findActualFolderName:', e.message); }
+  return buildFolderName(); // fallback al nome costruito
+}
+
+function buildFolderBaseName(year) {
+  // Base del nome file = nome cartella senza "Documentazione fotografica"
+  // ma con l'anno corretto della foto (non necessariamente l'anno corrente)
+  const sito   = sanitize(currentProj?.codiceSito    || '');
+  const comm   = sanitize(currentProj?.committente   || '');
+  const comune = sanitize(currentProj?.comune        || '');
+  const prog   = sanitize(currentProj?.codiceProgetto || '');
+  const yy     = String(year || new Date().getFullYear()).slice(2);
+  return [sito, `${comm}${yy}`, comune, prog].filter(Boolean).join('_');
+}
+
 function buildNum(yearIndex, year) {
-  const base = buildFolderName().replace(/_Documentazione fotografica$/i, '');
-  return `${base}_${String(yearIndex + 1).padStart(3,'0')}`;
+  return `${buildFolderBaseName(year)}_${String(yearIndex + 1).padStart(3,'0')}`;
 }
 
 function buildNumPreview(i, year) {
-  const base = buildFolderName().replace(/_Documentazione fotografica$/i, '');
-  return `${base}_${String(i + 1).padStart(3,'0')}`;
+  return `${buildFolderBaseName(year)}_${String(i + 1).padStart(3,'0')}`;
 }
 
 async function getExistingPhotoCountForYear(driveId, folderName, year) {
   try {
-    const base   = buildFolderName().replace(/_Documentazione fotografica$/i, '');
-    const prefix = `${base}_`.toLowerCase();
+    const prefix = `${buildFolderBaseName(year)}_`.toLowerCase();
     const files  = await getDriveChildren(driveId, folderName, 'name');
     return files.filter(f =>
       f.name.toLowerCase().startsWith(prefix) &&
@@ -1533,7 +1617,10 @@ async function getExistingPhotoCountForYear(driveId, folderName, year) {
 }
 
 function sanitize(s) {
-  return (s || '').trim().replace(/\s+/g, '').replace(/[^a-zA-Z0-9_-]/g, '');
+  return (s || '').trim()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // è→e, à→a, ù→u ecc.
+    .replace(/\s+/g, '')
+    .replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
 function sortByExifDate(a, b) {
