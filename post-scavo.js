@@ -246,7 +246,6 @@ async function loadCurrentUserRole() {
 
     if (utente) {
       currentUserRole = (utente.fields.Ruolo || 'operator').toLowerCase();
-      console.log(`👤 Ruolo: ${currentUserRole}`);
     } else {
       console.warn('Utente non trovato nella lista Utenti, ruolo default: operator');
       currentUserRole = 'operator';
@@ -263,23 +262,20 @@ async function loadCantieri() {
   const listId = d.value[0].id;
   const items  = await spFetch(`https://graph.microsoft.com/v1.0/sites/${cantieriSiteId}/lists/${listId}/items?$expand=fields&$top=999`);
 
-  const deaccent = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-
   cantieriData = items.value.map(i => ({
     id:                  i.id,
     title:               i.fields.Title || '',
-    comune:              deaccent(i.fields.Comune || ''),
-    committente:         deaccent(i.fields.Committente || ''),
-    codiceProgetto:      deaccent(i.fields.CodProg || ''),
-    codiceCommessa:      deaccent(i.fields.CodComm || ''),
-    codiceSito:          deaccent(i.fields.CodiceSito || ''),
+    comune:              i.fields.Comune || '',
+    committente:         i.fields.Committente || '',
+    codiceProgetto:      i.fields.CodProg || '',
+    codiceCommessa:      i.fields.CodComm || '',
+    codiceSito:          i.fields.CodiceSito || '',
     responsabileEnte:    i.fields.ResponsabileEnte || '',
     descrizioneProgetto: i.fields.Descrizione || i.fields.Description || i.fields.Descrizione0 || '',
   }));
 
   // Debug: stampa i campi del primo cantiere per verificare i nomi
   if (items.value.length > 0) {
-    console.log('📋 Campi cantiere (primo elemento):', Object.keys(items.value[0].fields).join(', '));
   }
 
   const sel = document.getElementById('selCantiere');
@@ -310,13 +306,11 @@ async function ensureCatalogoList() {
     const nomi = cols.value
       .filter(c => !c.readOnly && !c.hidden)
       .map(c => `"${c.name}" (display: "${c.displayName}")`);
-    console.log('📋 Colonne CatalogoFoto:', nomi.join('\n'));
   } catch(e) { console.warn('Impossibile leggere colonne:', e.message); }
 }
 
 async function getDriveForFoto() {
   const d = await spFetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drives`);
-  console.log('📁 Raccolte disponibili:', d.value.map(x => `"${x.name}"`).join(', '));
   const drive = d.value.find(x => x.name === FOTO_DRIVE_NAME);
   if (!drive) throw new Error(`Raccolta documenti "${FOTO_DRIVE_NAME}" non trovata su Akhet-Postscavo. Creala prima di caricare foto.`);
   return drive;
@@ -384,7 +378,6 @@ async function getExistingPhotoCount() {
     const folderName = buildFolderName();
     const files = await getDriveChildren(drive.id, folderName, 'name');
     const imageFiles = files.filter(f => /\.(jpg|jpeg|png|heic)$/i.test(f.name));
-    console.log(`📊 Foto esistenti nella cartella "${folderName}": ${imageFiles.length}`);
     return imageFiles.length;
   } catch(e) {
     console.warn('getExistingPhotoCount errore:', e.message);
@@ -482,10 +475,80 @@ async function initializeApp() {
 
     overlay.style.display = 'none';
     updateButtonStates();
+
+    // Avviso sessione scaduta dopo 55 minuti
+    setTimeout(() => {
+      showMsg('⚠️ La sessione sta per scadere. Salva il lavoro e ricarica la pagina per continuare.', 'error');
+    }, 55 * 60 * 1000);
+
   } catch(e) {
     overlay.style.display = 'none';
     showMsg('❌ ' + e.message, 'error');
   }
+}
+
+// ── Lock cantiere ─────────────────────────────────────────
+// Usa CatalogoFoto su SP come registro: salva un campo LockBy/LockAt
+// Approccio leggero: lista SP dedicata non necessaria, usiamo sessionStorage
+// condiviso tra tab ma non tra utenti — per multi-utente usiamo un item SP
+
+const LOCK_ITEM_KEY = 'AkhetLock';
+
+async function acquireCantierelock(cantiereTitle) {
+  try {
+    const filter = encodeURIComponent(`fields/Title eq '${LOCK_ITEM_KEY}_${cantiereTitle}'`);
+    const res = await spFetch(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${catalogoListId}/items?$filter=${filter}&$expand=fields&$top=1`
+    );
+    const user = currentUser?.name || currentUser?.username || 'Utente';
+    const now  = String(Date.now());
+
+    if (res.value.length > 0) {
+      const item   = res.value[0];
+      const lockBy = item.fields.Operatore || '';
+      const lockAt = parseInt(item.fields.Descrizione || '0');
+      const attivo = lockBy && lockBy !== user && (Date.now() - lockAt) < 30 * 60 * 1000;
+
+      // Aggiorna il lock con l'utente corrente
+      await spFetch(
+        `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${catalogoListId}/items/${item.id}`,
+        { method: 'PATCH', body: JSON.stringify({ fields: { Operatore: user, Descrizione: now } }) }
+      );
+      return { locked: attivo, by: lockBy };
+    }
+
+    // Crea il lock
+    await spFetch(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${catalogoListId}/items`,
+      { method: 'POST', body: JSON.stringify({ fields: {
+        Title: `${LOCK_ITEM_KEY}_${cantiereTitle}`,
+        NFoto: `${LOCK_ITEM_KEY}_${cantiereTitle}`,
+        FilenameFoto: `${LOCK_ITEM_KEY}_${cantiereTitle}`,
+        CantiereTitolo: cantiereTitle,
+        Operatore: user,
+        Descrizione: now,
+      }}) }
+    );
+    return { locked: false };
+  } catch(e) {
+    console.warn('Lock cantiere non disponibile:', e.message);
+    return { locked: false };
+  }
+}
+
+async function releaseCantierelock(cantiereTitle) {
+  try {
+    const filter = encodeURIComponent(`fields/Title eq '${LOCK_ITEM_KEY}_${cantiereTitle}'`);
+    const res = await spFetch(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${catalogoListId}/items?$filter=${filter}&$top=1`
+    );
+    if (res.value.length > 0) {
+      await spFetch(
+        `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${catalogoListId}/items/${res.value[0].id}`,
+        { method: 'PATCH', body: JSON.stringify({ fields: { Descrizione: '0' } }) }
+      );
+    }
+  } catch(e) { /* silenzioso */ }
 }
 
 // Mostra/nasconde bottoni in base al ruolo e allo stato
@@ -622,7 +685,6 @@ async function renderCantieriGrid(list) {
       if (t) counts[t] = (counts[t] || 0) + 1;
     });
 
-    console.log('📊 Conteggi foto per cantiere:', counts);
     // Aggiorna badge nelle card
     list.forEach(c => {
       const badge = document.getElementById(`badge-${c.id}`);
@@ -927,7 +989,19 @@ async function startUpload() {
     }
 
     bar.style.width = '100%';
-    counter.textContent = `✅ ${sorted.length} foto caricate con successo!`;
+
+    // Riepilogo upload
+    const uploadOk   = catalogRows.filter(r => r.spItemId === null && r.filename).length;
+    const uploadFail = sorted.length - uploadOk;
+    if (uploadFail === 0) {
+      counter.textContent = `✅ ${uploadOk} foto caricate con successo!`;
+      addLog('✅ Tutte le foto sono state caricate correttamente.');
+    } else {
+      counter.textContent = `⚠️ ${uploadOk} foto caricate, ${uploadFail} con errori`;
+      addLog(`⚠️ ${uploadFail} foto non caricate — controlla il log sopra per i dettagli.`);
+      showMsg(`⚠️ ${uploadFail} foto non caricate correttamente. Controlla il log per i dettagli.`, 'error');
+    }
+
     addLog('📋 Procedendo alla catalogazione...');
     syncInfoBars();
     renderCatalogRows();
@@ -1040,7 +1114,18 @@ function removeCatalogRow(id) {
 // ══════════════════════════════════════
 
 async function saveCatalog() {
-  document.getElementById('btnSaveCatalog').disabled = true;
+  // Validazione campi obbligatori
+  const righeIncomplete = catalogRows.filter(r => !r.data || !r.operatore);
+  if (righeIncomplete.length > 0) {
+    const nomi = righeIncomplete.map(r => r.filename?.replace(/\.jpg$/i,'')).join(', ');
+    showMsg(`⚠️ Campi obbligatori mancanti (Data e Operatore) per: ${nomi}. Compilali prima di salvare.`, 'error');
+    // Evidenzia righe incomplete
+    righeIncomplete.forEach(r => {
+      const cell = document.querySelector(`[data-filename="${CSS.escape(r.filename)}"]`);
+      if (cell) cell.closest('tr').style.outline = '2px solid #c62828';
+    });
+    return;
+  }
   const msg = document.getElementById('catalogSaveMsg');
   if (msg) { msg.textContent = '⏳ Caricamento catalogo completo...'; msg.style.display = 'block'; }
   try {
@@ -1119,17 +1204,17 @@ async function aggiornaCatalogo() {
     showMsg('⏳ Lettura catalogo da SharePoint...', 'success');
     const tutteLeRighe = await getExistingCatalogItems();
 
-    // Costruisci mappa nome (senza .jpg, normalizzato) → riga catalogo
-    const normalize = s => (s||'').replace(/\.jpg$/i,'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    // Costruisci mappa nome (senza .jpg, lowercase) → riga catalogo
+    const normKey = s => (s||'').replace(/\.jpg$/i,'').toLowerCase();
     const catalogoMap = {};
     tutteLeRighe.forEach(r => {
-      const key = normalize(r.filename);
+      const key = normKey(r.filename);
       if (key) catalogoMap[key] = r;
     });
 
-    // 3. Abbina ogni file SP alla sua riga CatalogoFoto per nome (normalizzato)
+    // 3. Abbina ogni file SP alla sua riga CatalogoFoto per nome
     const fileRows = spFiles.map(spFile => {
-      const key      = normalize(spFile.name);
+      const key        = normKey(spFile.name);
       const catalogRow = catalogoMap[key] || null;
       const dataOp   = catalogRow?.data ? new Date(catalogRow.data + 'T00:00:00') : null;
       const dataSP   = new Date(spFile.lastModifiedDateTime);
@@ -1481,6 +1566,13 @@ function _downloadBlob(blob, filename) {
 
 async function enterReviewMode() {
   if (!currentProj) return;
+
+  // Controlla lock cantiere — solo avviso, non blocca
+  const lock = await acquireCantierelock(currentProj.title);
+  if (lock.locked) {
+    showMsg(`ℹ️ Attenzione: ${lock.by} sta già lavorando su questo cantiere. Coordinarsi prima di salvare.`, 'success');
+  }
+
   syncInfoBars();
   showMsg('⏳ Caricamento catalogo da SharePoint...', 'success');
   try {
@@ -1519,9 +1611,32 @@ async function enterReviewMode() {
 // Sincronizzazione leggera: legge i file presenti nella cartella SP
 // ed elimina da CatalogoFoto le righe orfane. Restituisce le righe valide.
 async function _sincronizzaSilente(items) {
-  // Non cancelliamo nulla automaticamente — solo riportiamo i file mancanti
-  // per evitare perdite di dati in caso di disallineamento nomi vecchi/nuovi
-  return items;
+  // Verifica quali righe di CatalogoFoto hanno ancora il file corrispondente su SP
+  // Le righe orfane vengono marcate ma NON cancellate automaticamente
+  try {
+    const drive      = await getDriveForFoto();
+    const folderName = await findActualFolderName(drive);
+    const files      = await getDriveChildren(drive.id, folderName, 'name');
+    const norm        = s => (s||'').toLowerCase();
+    const filesOnDisk = new Set(files
+      .filter(f => /\.(jpg|jpeg|png|heic)$/i.test(f.name))
+      .map(f => norm(f.name)));
+
+    const orphans = items.filter(r => {
+      const fname = norm((r.filename || '') + (r.filename && r.filename.includes('.') ? '' : '.jpg'));
+      return fname && !filesOnDisk.has(fname);
+    });
+
+    if (orphans.length > 0) {
+      showMsg(`ℹ️ ${orphans.length} foto nel catalogo non trovate nella cartella SharePoint. Potrebbero essere state eliminate manualmente.`, 'success');
+    }
+
+    // Restituisce TUTTE le righe — non elimina nulla
+    return items;
+  } catch(e) {
+    console.warn('Sincronizzazione silente fallita:', e.message);
+    return items;
+  }
 }
 
 async function _loadThumbnailsFromSharePoint(items) {
@@ -1579,7 +1694,7 @@ function buildFolderName() {
 
 // Cerca la cartella reale su SharePoint (gestisce accenti e varianti nel nome)
 async function findActualFolderName(drive) {
-  const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[\s_-]/g,'');
+  const norm = s => (s||'').toLowerCase().replace(/\s+/g,'');
   const expected = norm(buildFolderName());
   try {
     const res = await fetch(
@@ -1592,7 +1707,7 @@ async function findActualFolderName(drive) {
       if (found) return found.name;
     }
   } catch(e) { console.warn('findActualFolderName:', e.message); }
-  return buildFolderName(); // fallback al nome costruito
+  return buildFolderName();
 }
 
 function buildFolderBaseName(year) {
@@ -1627,9 +1742,8 @@ async function getExistingPhotoCountForYear(driveId, folderName, year) {
 
 function sanitize(s) {
   return (s || '').trim()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // è→e, à→a, ù→u ecc.
     .replace(/\s+/g, '')
-    .replace(/[^a-zA-Z0-9_-]/g, '');
+    .replace(/[^a-zA-ZÀ-ÖØ-öø-ÿ0-9_-]/g, '');
 }
 
 function sortByExifDate(a, b) {
@@ -1699,7 +1813,6 @@ function fileToDataUrl(file) {
     const r = new FileReader();
     r.onload = e => {
       const result = e.target.result;
-      console.log(`fileToDataUrl ${file.name}: tipo=${typeof result}, lunghezza=${result?.length || 0}, inizio=${result?.slice(0,30) || 'VUOTO'}`);
       res(result || '');
     };
     r.onerror = e => { console.error('FileReader errore:', e); res(''); };
@@ -1790,6 +1903,8 @@ async function openLightboxFull(row) {
 }
 
 function resetAll() {
+  // Rilascia lock cantiere se attivo
+  if (currentProj) releaseCantierelock(currentProj.title).catch(() => {});
   // Reset stato
   currentProj = null;
   bulkFiles = [];
@@ -1966,6 +2081,9 @@ function tavRemove(id) {
 async function tavGoToPreview() {
   if (!tavFiles.length) { alert('Carica almeno un PDF.'); return; }
   tavSyncInfoBars();
+
+  // Non estrae più nulla dal PDF — solo nome file
+  // Genera miniatura per anteprima
   document.getElementById('btnTavNext').disabled = true;
   tavGoToPhase('tav-phase-reading', 3);
 
@@ -1976,30 +2094,14 @@ async function tavGoToPreview() {
   for (let i = 0; i < tavFiles.length; i++) {
     const item = tavFiles[i];
     bar.style.width = Math.round((i / tavFiles.length) * 100) + '%';
-    counter.textContent = `Lettura ${i+1} di ${tavFiles.length}: ${item.fileName}`;
-    msg.textContent = 'Apertura PDF...';
+    counter.textContent = `Anteprima ${i+1} di ${tavFiles.length}: ${item.fileName}`;
+    msg.textContent = 'Generazione anteprima...';
 
     try {
-      const buf = await item.file.arrayBuffer();
-
-      // Opzioni per performance con file pesanti
-      const loadTask = pdfjsLib.getDocument({
-        data:               buf,
-        disableFontFace:    true,   // non scarica font esterni
-        isEvalSupported:    false,  // sicurezza
-        disableRange:       false,
-        disableStream:      false,
-      });
-      const pdf = await loadTask.promise;
+      const buf  = await item.file.arrayBuffer();
+      const pdf  = await pdfjsLib.getDocument({ data: buf, disableFontFace: true, isEvalSupported: false }).promise;
       item.pdfDoc = pdf;
 
-      // Estrai solo la data dal cartiglio
-      msg.textContent = `Lettura data ${i+1}/${tavFiles.length}...`;
-      item.data = await estraiSoloData(pdf);
-      // autore e descrizione restano vuoti → compilazione libera dall'utente
-
-      // Miniatura compressa (scala bassa per file pesanti)
-      msg.textContent = `Anteprima ${i+1}/${tavFiles.length}...`;
       const page1 = await pdf.getPage(1);
       const vp    = page1.getViewport({ scale: 0.22 });
       const canvas = document.createElement('canvas');
@@ -2008,30 +2110,19 @@ async function tavGoToPreview() {
       canvas.style.width  = '100%';
       canvas.style.cursor = 'pointer';
       canvas.onclick = () => openTavPreview(item.id);
-      await page1.render({
-        canvasContext: canvas.getContext('2d'),
-        viewport:      vp,
-        intent:        'print',   // più veloce di 'display'
-      }).promise;
+      await page1.render({ canvasContext: canvas.getContext('2d'), viewport: vp, intent: 'print' }).promise;
 
       item.thumbDataUrl = canvas.toDataURL('image/jpeg', 0.55);
-
       const wrap = document.getElementById('tcanvas-wrap-' + item.id);
       if (wrap) { wrap.innerHTML = ''; wrap.appendChild(canvas); }
 
-      // Aggiorna card
-      const badge  = document.getElementById('tbadge-' + item.id);
-      const metaEl = document.getElementById('tmeta-' + item.id);
-      const card   = document.getElementById('tcard-' + item.id);
-      if (badge)  { badge.className = 'tav-badge done-badge'; badge.textContent = '✓'; }
-      if (card)   card.className = 'tav-card done-card';
-      if (metaEl) metaEl.textContent = item.data || '—';
+      const badge = document.getElementById('tbadge-' + item.id);
+      const card  = document.getElementById('tcard-' + item.id);
+      if (badge) { badge.className = 'tav-badge done-badge'; badge.textContent = '✓'; }
+      if (card)  card.className = 'tav-card done-card';
 
     } catch(e) {
       console.error('Errore lettura PDF:', item.fileName, e);
-      const metaEl = document.getElementById('tmeta-' + item.id);
-      if (metaEl) metaEl.textContent = '⚠️ Errore lettura';
-      item.data = '';
     }
   }
 
@@ -2116,6 +2207,14 @@ function closestByX(rowItems, targetX) {
 
 // ── Fase 4: tabella preview ─────────────────────────────
 
+const TAV_DESCRIZIONI = [
+  '',
+  'Inquadramento dell\'opera di progetto',
+  'Posizionamento dell\'assistenza archeologica',
+  'Tavola di dettaglio',
+  'Altro',
+];
+
 function renderTavRows() {
   const tbody = document.getElementById('tavRows');
   tbody.innerHTML = '';
@@ -2126,15 +2225,34 @@ function renderTavRows() {
       <td style="text-align:center">
         <button onclick="openTavPreview(${r.id})" style="background:none;border:none;font-size:18px;cursor:pointer" title="Anteprima">👁️</button>
       </td>
-      <td><input type="text" class="sm" value="${esc(r.data)}" placeholder="gg/mm/aaaa" oninput="tavUpdateField(${r.id},'data',this.value)" style="min-width:90px"></td>
+      <td><input type="date" class="sm" value="${esc(r.data)}" onchange="tavUpdateField(${r.id},'data',this.value)" style="min-width:130px"></td>
       <td><input type="text" class="sm" value="${esc(r.autore)}" placeholder="Autore" oninput="tavUpdateField(${r.id},'autore',this.value)" style="min-width:110px"></td>
       <td class="num-cell" style="font-size:11px;word-break:break-all">${esc(r.fileName)}</td>
-      <td><input type="text" class="sm" value="${esc(r.descrizione)}" placeholder="Descrizione / Titolo tavola" oninput="tavUpdateField(${r.id},'descrizione',this.value)" style="min-width:200px"></td>
+      <td>
+        <select class="sm" onchange="tavUpdateDesc(${r.id}, this)" style="min-width:220px">
+          ${TAV_DESCRIZIONI.map(d => `<option value="${esc(d)}"${d===r.descrizione?' selected':''}>${d||'— Seleziona —'}</option>`).join('')}
+        </select>
+        ${r.descrizione === 'Altro' ? `<input type="text" class="sm" value="${esc(r.descrizioneAltro||'')}" placeholder="Specifica..." oninput="tavUpdateField(${r.id},'descrizioneAltro',this.value)" style="min-width:180px;margin-top:4px">` : ''}
+      </td>
       <td style="white-space:nowrap">
         ${tavFiles.length > 1 ? `<button class="btn small-btn btn-danger" onclick="tavRemoveRow(${r.id})" style="padding:3px 7px;font-size:12px">✕</button>` : ''}
       </td>`;
     tbody.appendChild(tr);
   });
+}
+
+function tavUpdateDesc(id, sel) {
+  const r = tavFiles.find(f => f.id === id);
+  if (!r) return;
+  r.descrizione = sel.value;
+  r.descrizioneAltro = '';
+  // Ri-renderizza solo la riga per mostrare/nascondere il campo "Altro"
+  renderTavRows();
+}
+
+function tavGetDescrizione(r) {
+  if (r.descrizione === 'Altro') return r.descrizioneAltro || '';
+  return r.descrizione || '';
 }
 
 function tavUpdateField(id, field, val) {
@@ -2178,69 +2296,181 @@ function closeTavPreview() {
   document.getElementById('tavPreviewModal').classList.remove('active');
 }
 
-// ── Genera e scarica PDF elenco ─────────────────────────
+// ── Genera elenco tavole ────────────────────────────────
 
-function scaricaElencoTavole() {
+function showTavModelSelector() {
   if (!tavFiles.length) { alert('Nessuna tavola da esportare.'); return; }
+  document.getElementById('tavModelSelectorModal').style.display = 'flex';
+}
+function closeTavModal() {
+  document.getElementById('tavModelSelectorModal').style.display = 'none';
+}
 
-  const comune  = tavProj?.comune         || '';
-  const prog    = tavProj?.codiceProgetto  || '';
-  const comm    = tavProj?.committente     || '';
-  const titolo  = tavProj?.title           || '';
+async function esportaTavole(modello, formato) {
+  closeTavModal();
+  const rows = tavFiles.map(r => ({
+    data:        r.data ? new Date(r.data + 'T00:00:00').toLocaleDateString('it-IT') : '',
+    autore:      r.autore || '',
+    fileName:    r.fileName || '',
+    descrizione: tavGetDescrizione(r),
+  }));
 
-  // Costruisci righe tabella con virgolette per valori ripetuti
-  let prevData = null, prevAutore = null;
-  const tableRows = tavFiles.map(r => {
-    const newData   = r.data   !== prevData;
-    const newAutore = r.autore !== prevAutore;
-    const dataCell   = newData   ? esc(r.data)   : '"';
-    const autoreCell = newAutore ? esc(r.autore)  : '"';
-    prevData = r.data; prevAutore = r.autore;
-    return `<tr>
-      <td>${dataCell}</td>
-      <td>${autoreCell}</td>
-      <td style="text-align:left;word-break:break-word">${esc(r.fileName)}</td>
-      <td style="text-align:left">${esc(r.descrizione)}</td>
-    </tr>`;
-  }).join('');
+  if (formato === 'pdf') {
+    openPrintWindow(modello === 'piemonte' ? buildTavPdfPiemonte(rows) : buildTavPdfVda(rows), 'elenco_tavole');
+  } else {
+    modello === 'piemonte' ? await buildTavWordPiemonte(rows) : await buildTavWordVda(rows);
+  }
+}
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+function buildTavPdfPiemonte(rows) {
+  const comune = tavProj?.comune || '';
+  const prog   = tavProj?.codiceProgetto || '';
+  const comm   = tavProj?.committente || '';
+  const titolo = tavProj?.descrizioneProgetto || tavProj?.title || '';
+  const tableRows = rows.map(r => `<tr>
+    <td style="white-space:nowrap">${esc(r.data)}</td>
+    <td>${esc(r.autore)}</td>
+    <td style="text-align:left;word-break:break-word">${esc(r.fileName)}</td>
+    <td style="text-align:left">${esc(r.descrizione)}</td>
+  </tr>`).join('');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
-  body { font-family: 'Times New Roman', Times, serif; font-size: 11pt; margin: 2cm; }
-  p.center { text-align: center; margin: 3px 0; }
-  p.title-lg { font-size: 12pt; font-weight: bold; text-align: center; margin: 3px 0; }
-  p.title-sm { font-size: 11pt; text-align: center; margin: 3px 0; }
-  p.italic   { font-style: italic; text-align: center; margin: 3px 0; }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 10pt; }
-  thead { display: table-header-group; }
-  th { background: #cccccc; border: 1px solid #666; padding: 5px 7px; text-align: center; font-size: 10pt; }
-  td { border: 1px solid #888; padding: 4px 7px; vertical-align: top; text-align: center; }
-  small { font-size: 9pt; }
-  @media print { body { margin: 1.5cm; } @page { size: A4 portrait; margin: 1.5cm; } }
-</style>
-</head><body>
-<p class="title-lg">SOPRINTENDENZA ARCHEOLOGICA DEL PIEMONTE</p>
-<p class="title-lg">ARCHIVIO FOTOGRAFICO BENI IMMOBILI</p>
-<br>
-${comune ? `<p class="title-sm">COMUNE DI ${esc(comune.toUpperCase())}</p><br>` : ''}
-${prog   ? `<p class="title-sm">${esc(comm)} PROG. ${esc(prog)}</p>` : ''}
-${titolo ? `<p class="title-sm">${esc(titolo)}</p>` : ''}
-<br>
-<p class="italic">ELENCO DOCUMENTAZIONE GRAFICA</p>
-<table>
-  <thead>
-    <tr>
-      <th style="width:11%">DATA</th>
-      <th style="width:15%">AUTORE</th>
-      <th style="width:30%">NOME FILE</th>
-      <th style="width:44%">DESCRIZIONE</th>
-    </tr>
-  </thead>
-  <tbody>${tableRows}</tbody>
-</table>
+  body{font-family:'Times New Roman',serif;font-size:11pt;margin:2cm}
+  p{text-align:center;margin:3px 0} .hdr{font-size:12pt;font-weight:bold}
+  .comune{font-size:13pt;font-weight:bold;margin-top:14px} .descr{font-style:italic;margin:4px 0}
+  .elenco{font-style:italic;margin-top:14px}
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:10pt}
+  thead{display:table-header-group}
+  th{background:#ccc;border:1px solid #666;padding:5px 7px;text-align:center}
+  td{border:1px solid #888;padding:4px 7px;vertical-align:top;text-align:center}
+  @media print{body{margin:1.5cm}@page{size:A4 portrait;margin:1.5cm}}
+</style></head><body>
+<p class="hdr">SOPRINTENDENZA ARCHEOLOGICA DEL PIEMONTE</p>
+<p class="hdr">ARCHIVIO FOTOGRAFICO BENI IMMOBILI</p>
+${comune ? `<p class="comune">COMUNE DI ${esc(comune.toUpperCase())}</p>` : ''}
+${(comm||prog) ? `<p>${[comm?esc(comm):'',prog?`PROG. ${esc(prog)}`:''].filter(Boolean).join(' ')}</p>` : ''}
+${titolo ? `<p class="descr">${esc(titolo)}</p>` : ''}
+<p class="elenco">ELENCO DOCUMENTAZIONE GRAFICA</p>
+<table><thead><tr>
+  <th style="width:11%">DATA</th><th style="width:18%">AUTORE</th>
+  <th style="width:33%">NOME FILE</th><th style="width:38%">DESCRIZIONE</th>
+</tr></thead><tbody>${tableRows}</tbody></table>
 </body></html>`;
+}
 
-  openPrintWindow(html, 'elenco_documentazione_grafica');
+function buildTavPdfVda(rows) {
+  const comune  = tavProj?.comune || '';
+  const codice  = tavProj?.codiceSito || '';
+  const denom   = tavProj?.descrizioneProgetto || tavProj?.title || '';
+  const tableRows = rows.map(r => `<tr>
+    <td style="white-space:nowrap">${esc(r.data)}</td>
+    <td>${esc(r.autore)}</td>
+    <td style="text-align:left;word-break:break-word">${esc(r.fileName)}</td>
+    <td style="text-align:left">${esc(r.descrizione)}</td>
+  </tr>`).join('');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body{font-family:'Times New Roman',serif;font-size:11pt;margin:1.5cm}
+  p{margin:4px 0} .titolo{font-size:13pt;font-weight:bold;text-align:center;margin-bottom:16px}
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:10pt}
+  thead{display:table-header-group}
+  th{background:#ccc;border:1px solid #666;padding:5px 7px;text-align:center}
+  td{border:1px solid #888;padding:4px 7px;vertical-align:top;text-align:center}
+  @media print{body{margin:1cm}@page{size:A4 landscape;margin:1cm}}
+</style></head><body>
+<p class="titolo">ELENCO DOCUMENTAZIONE GRAFICA</p>
+<p><strong>COMUNE:</strong> ${esc(comune)}</p>
+<p><strong>LOCALIT\u00c0 o SPAZIO VIABILISTICO:</strong></p>
+<p><strong>CODICI:</strong> ${esc(codice)}</p>
+<p><strong>DENOMINAZIONE:</strong> ${esc(denom)}</p>
+<table><thead><tr>
+  <th style="width:10%">DATA</th><th style="width:18%">AUTORE</th>
+  <th style="width:30%">NOME FILE</th><th style="width:42%">DESCRIZIONE</th>
+</tr></thead><tbody>${tableRows}</tbody></table>
+</body></html>`;
+}
+
+async function buildTavWordPiemonte(rows) {
+  try {
+    const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+            AlignmentType, WidthType, BorderStyle } = docx;
+    const comune = tavProj?.comune||'', prog = tavProj?.codiceProgetto||'';
+    const comm   = tavProj?.committente||'';
+    const titolo = tavProj?.descrizioneProgetto||tavProj?.title||'';
+    const bdr = { style:BorderStyle.SINGLE, size:6, color:'888888' };
+    const cb  = { top:bdr, bottom:bdr, left:bdr, right:bdr };
+    const hC  = (t,w) => new TableCell({ width:{size:w,type:WidthType.DXA}, borders:cb,
+      shading:{fill:'CCCCCC'}, children:[new Paragraph({alignment:AlignmentType.CENTER,
+        children:[new TextRun({text:t,bold:true,size:18})]})] });
+    const dC  = (t,al,w) => new TableCell({ width:{size:w,type:WidthType.DXA}, borders:cb,
+      children:[new Paragraph({alignment:al, children:[new TextRun({text:t||'',size:18})]})] });
+    const tRows = [
+      new TableRow({children:[hC('DATA',1300),hC('AUTORE',2200),hC('NOME FILE',4000),hC('DESCRIZIONE',4800)]}),
+      ...rows.map(r => new TableRow({children:[
+        dC(r.data, AlignmentType.CENTER,1300),
+        dC(r.autore, AlignmentType.CENTER,2200),
+        dC(r.fileName, AlignmentType.LEFT,4000),
+        dC(r.descrizione, AlignmentType.LEFT,4800),
+      ]}))
+    ];
+    const cp = (t,bold=false,sz=22) => new Paragraph({alignment:AlignmentType.CENTER,
+      children:[new TextRun({text:t,bold,size:sz})]});
+    const doc = new Document({ sections:[{ children:[
+      cp('SOPRINTENDENZA ARCHEOLOGICA DEL PIEMONTE',true,22),
+      cp('ARCHIVIO FOTOGRAFICO BENI IMMOBILI',true,22), cp(''),
+      ...(comune?[cp(`COMUNE DI ${comune.toUpperCase()}`,true,26),cp('')]:[]),
+      ...((comm||prog)?[cp(`${comm}${prog?' PROG. '+prog:''}`,false,22)]:[]),
+      ...(titolo?[cp(titolo,false,22),cp('')]:[]),
+      cp('ELENCO DOCUMENTAZIONE GRAFICA',false,22), cp(''),
+      new Table({width:{size:12300,type:WidthType.DXA}, rows:tRows}),
+    ]}]});
+    _downloadBlob(await Packer.toBlob(doc), `elenco_tavole_piemonte_${sanitize(tavProj?.title||'')}.docx`);
+  } catch(e) { alert('Errore Word Piemonte: '+e.message); }
+}
+
+async function buildTavWordVda(rows) {
+  try {
+    const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+            AlignmentType, WidthType, BorderStyle, PageOrientation } = docx;
+    const comune  = tavProj?.comune||'';
+    const codice  = tavProj?.codiceSito||'';
+    const denom   = tavProj?.descrizioneProgetto||tavProj?.title||'';
+    const bdr = { style:BorderStyle.SINGLE, size:6, color:'888888' };
+    const cb  = { top:bdr, bottom:bdr, left:bdr, right:bdr };
+    const hC  = (t,w) => new TableCell({ width:{size:w,type:WidthType.DXA}, borders:cb,
+      shading:{fill:'CCCCCC'}, children:[new Paragraph({alignment:AlignmentType.CENTER,
+        children:[new TextRun({text:t,bold:true,size:18})]})] });
+    const dC  = (t,al,w) => new TableCell({ width:{size:w,type:WidthType.DXA}, borders:cb,
+      children:[new Paragraph({alignment:al, children:[new TextRun({text:t||'',size:18})]})] });
+    const tRows = [
+      new TableRow({children:[hC('DATA',1300),hC('AUTORE',2200),hC('NOME FILE',4300),hC('DESCRIZIONE',6500)]}),
+      ...rows.map(r => new TableRow({children:[
+        dC(r.data, AlignmentType.CENTER,1300),
+        dC(r.autore, AlignmentType.CENTER,2200),
+        dC(r.fileName, AlignmentType.LEFT,4300),
+        dC(r.descrizione, AlignmentType.LEFT,6500),
+      ]}))
+    ];
+    const lbl = (label,val) => new Paragraph({children:[
+      new TextRun({text:label+' ',bold:true,size:22}),
+      new TextRun({text:val||'',size:22})
+    ]});
+    const doc = new Document({ sections:[{
+      properties:{page:{size:{orientation:PageOrientation.LANDSCAPE}}},
+      children:[
+        new Paragraph({alignment:AlignmentType.CENTER,
+          children:[new TextRun({text:'ELENCO DOCUMENTAZIONE GRAFICA',bold:true,size:26})]}),
+        new Paragraph({text:''}),
+        lbl('COMUNE:', comune),
+        lbl('LOCALIT\u00c0 o SPAZIO VIABILISTICO:', ''),
+        lbl('CODICI:', codice),
+        lbl('DENOMINAZIONE:', denom),
+        new Paragraph({text:''}),
+        new Table({width:{size:14300,type:WidthType.DXA}, rows:tRows}),
+      ]
+    }]});
+    _downloadBlob(await Packer.toBlob(doc), `elenco_tavole_vda_${sanitize(tavProj?.title||'')}.docx`);
+  } catch(e) { alert('Errore Word VdA: '+e.message); }
 }
 
 // ── Reset sezione tavole ────────────────────────────────

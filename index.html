@@ -369,12 +369,112 @@ select.sm{width:80px}
 
   <!-- ══ SEZIONE: Elenco Tavole ══ -->
   <div id="sec-tavole" class="main-section">
-    <div class="placeholder-section">
-      <div class="ph-icon">📐</div>
-      <h3>Elenco Tavole</h3>
-      <p>Questa sezione sarà disponibile in una versione futura.<br>Conterrà l'elenco delle tavole grafiche prodotte per il cantiere.</p>
+
+    <!-- Step bar -->
+    <div class="steps-bar" id="tavStepIndicator">
+      <div class="step active" id="tavs1">1 · Cantiere</div>
+      <div class="step" id="tavs2">2 · Tavole</div>
+      <div class="step" id="tavs3">3 · Lettura</div>
+      <div class="step" id="tavs4">4 · Elenco</div>
     </div>
-  </div>
+
+    <div id="appMsgTav"></div>
+
+    <!-- Fase 1: Cantiere -->
+    <div class="tav-phase active" id="tav-phase-cantiere">
+      <h3>📐 Elenco Tavole</h3>
+      <label>Seleziona cantiere</label>
+      <select id="tavSelCantiere" style="max-width:500px;margin-bottom:12px" onchange="tavOnCantiereChange()">
+        <option value="">— Seleziona —</option>
+      </select>
+      <div id="tavCantInfoBar" class="info-bar" style="display:none"></div>
+      <button class="btn btn-primary" id="tavBtnToUpload" style="display:none" onclick="tavGoToPhase('tav-phase-upload',2)">Avanti →</button>
+    </div>
+
+    <!-- Fase 2: Upload PDF -->
+    <div class="tav-phase" id="tav-phase-upload">
+      <h3>📄 Carica le tavole PDF</h3>
+      <div id="tavCantInfoBar2" class="info-bar" style="display:none"></div>
+      <div id="tavUploadArea" class="upload-area" onclick="document.getElementById('tavInput').click()">
+        <div style="font-size:40px;margin-bottom:8px">📄</div>
+        <p style="font-weight:600;color:#b8423a">Clicca o trascina i file PDF</p>
+        <p style="font-size:12px;color:#888;margin-top:6px">Puoi selezionare più file contemporaneamente</p>
+      </div>
+      <input type="file" id="tavInput" accept=".pdf,.tif,.tiff,.dwg,.dxf,.jpg,.jpeg,.png" multiple style="display:none" onchange="tavOnSelect(event)">
+      <div id="tavPreviewGrid" class="preview-grid"></div>
+      <div id="tavUploadActions" style="display:none;margin-top:12px">
+        <span id="tavCount" style="font-size:13px;color:#666;margin-right:12px"></span>
+        <button class="btn btn-primary" id="btnTavNext" onclick="tavGoToPreview()">Leggi e continua →</button>
+      </div>
+      <button class="btn btn-secondary small-btn" style="margin-top:12px" onclick="tavGoToPhase('tav-phase-cantiere',1)">← Indietro</button>
+    </div>
+
+    <!-- Fase 3: Lettura -->
+    <div class="tav-phase" id="tav-phase-reading">
+      <h3>⏳ Elaborazione tavole...</h3>
+      <div class="progress-wrap"><div class="progress-bar" id="tavProgressBar"></div></div>
+      <p id="tavReadCounter" style="font-size:13px;color:#666;margin:6px 0"></p>
+      <p id="tavReadMsg" style="font-size:12px;color:#aaa"></p>
+    </div>
+
+    <!-- Fase 4: Preview/elenco -->
+    <div class="tav-phase" id="tav-phase-preview">
+      <h3>📋 Elenco tavole</h3>
+      <div id="tavCantInfoBar3" class="info-bar" style="display:none"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Anteprima</th>
+              <th>Data</th>
+              <th>Autore</th>
+              <th>Nome file</th>
+              <th>Descrizione</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tavRows"></tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+        <button class="btn btn-primary" onclick="showTavModelSelector()">📄 Genera elenco</button>
+        <button class="btn btn-secondary small-btn" onclick="tavGoToPhase('tav-phase-upload',2)">← Aggiungi tavole</button>
+        <button class="btn btn-secondary small-btn" onclick="tavReset()">🔄 Ricomincia</button>
+      </div>
+    </div>
+
+    <!-- Modal preview tavola -->
+    <div id="tavPreviewModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:4000;align-items:center;justify-content:center;flex-direction:column"
+      onclick="closeTavPreview()">
+      <div style="background:#fff;border-radius:10px;padding:12px;max-width:90vw;max-height:90vh;overflow:auto" onclick="event.stopPropagation()">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span id="tavPreviewName" style="font-size:13px;font-weight:600;color:#333"></span>
+          <button onclick="closeTavPreview()" style="border:none;background:none;font-size:22px;cursor:pointer;color:#888">✕</button>
+        </div>
+        <canvas id="tavPreviewCanvas" style="max-width:80vw;max-height:80vh"></canvas>
+      </div>
+    </div>
+
+    <!-- Modal: scelta modello elenco tavole -->
+    <div id="tavModelSelectorModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:3000;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:14px;padding:30px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+        <h3 style="margin-bottom:20px;color:#333">📄 Genera elenco tavole</h3>
+        <p style="color:#666;font-size:14px;margin-bottom:20px">Scegli il modello e il formato:</p>
+        <p style="font-weight:600;font-size:13px;margin-bottom:10px;color:#555">Modello Piemonte (A4 verticale)</p>
+        <div style="display:flex;gap:10px;margin-bottom:20px">
+          <button class="btn btn-primary" onclick="esportaTavole('piemonte','pdf')" style="flex:1">📄 PDF</button>
+          <button class="btn btn-secondary" onclick="esportaTavole('piemonte','word')" style="flex:1">📝 Word</button>
+        </div>
+        <p style="font-weight:600;font-size:13px;margin-bottom:10px;color:#555">Modello Valle d'Aosta (A4 orizzontale)</p>
+        <div style="display:flex;gap:10px;margin-bottom:24px">
+          <button class="btn btn-primary" onclick="esportaTavole('vda','pdf')" style="flex:1">📄 PDF</button>
+          <button class="btn btn-secondary" onclick="esportaTavole('vda','word')" style="flex:1">📝 Word</button>
+        </div>
+        <button class="btn" onclick="closeTavModal()" style="width:100%;background:#f0f0f0;color:#666">Annulla</button>
+      </div>
+    </div>
+
+  </div><!-- /sec-tavole -->
 </div>
 
 <!-- LIGHTBOX -->
